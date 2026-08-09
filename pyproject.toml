@@ -23,7 +23,7 @@ dependencies = [
 dev = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/skullforge/skullforge"
+Homepage = "https://github.com/Devenom1/skullforge"
 
 [project.scripts]
 skullforge = "skullforge.cli:main"
