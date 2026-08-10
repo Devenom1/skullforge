@@ -1,7 +1,7 @@
 """Loads/saves ~/.config/skullforge/config.toml (respecting $XDG_CONFIG_HOME)."""
 import os
 import tomllib
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import tomli_w
@@ -20,8 +20,14 @@ def _config_path() -> Path:
 class Config:
     refresh_interval_s: float = 1.0
     time_format: str = "24h"  # "24h" or "12h"
+    date_format: str = "short"  # "short" | "iso" | "long" (see core/render.py's DATE_FORMATS)
     display_mode: str = "stats"  # "stats" or "color"
     color_hex: str = "#ff3b5c"
+    # Keys into core/render.py's STAT_DEFS, in display order. "fan" is
+    # deliberately never in the default - no known Linux source for fan
+    # RPM on this hardware (see project memory), so it's off by default
+    # and shown as not-yet-supported rather than a live toggle in the UI.
+    visible_stats: list[str] = field(default_factory=lambda: ["temp", "load", "mem", "power"])
     start_on_login: bool = False
     start_minimized: bool = False
     recover_script_path: str = "/usr/local/sbin/skullforge-panel-recover.sh"

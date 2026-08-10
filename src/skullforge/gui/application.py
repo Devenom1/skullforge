@@ -10,9 +10,9 @@ from gi.repository import Adw, Gio, GLib, Gtk
 
 from .. import __version__
 from ..config import Config
-from ..core.engine import Engine
 from .tray import Tray
 from .window import SkullForgeWindow
+from .worker_client import WorkerClient
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class SkullForgeApplication(Adw.Application):
     def __init__(self, config: Config):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.config = config
-        self.engine = Engine(config)
+        self.worker = WorkerClient(config)
         self.window: SkullForgeWindow | None = None
         self.tray: Tray | None = None
 
@@ -74,10 +74,14 @@ class SkullForgeApplication(Adw.Application):
         about_action.connect("activate", self._on_about)
         self.add_action(about_action)
 
+        quit_action = Gio.SimpleAction.new("quit", None)
+        quit_action.connect("activate", lambda *_a: self.quit())
+        self.add_action(quit_action)
+
     def do_activate(self) -> None:
         if self.window is None:
-            self.window = SkullForgeWindow(self, self.engine, self.config)
-            self.engine.connect("panel-status-changed", self._on_status_changed)
+            self.window = SkullForgeWindow(self, self.worker, self.config)
+            self.worker.connect("panel-status-changed", self._on_status_changed)
 
             self.hold()  # keep running even while the window is hidden
 
@@ -93,7 +97,7 @@ class SkullForgeApplication(Adw.Application):
                 "toggled", lambda btn: self.tray.send_paused(btn.get_active())
             )
 
-            self.engine.start()
+            self.worker.start()
 
         if not self.config.start_minimized:
             self._show_window()
@@ -101,7 +105,7 @@ class SkullForgeApplication(Adw.Application):
     def _show_window(self) -> None:
         self.window.present()
 
-    def _on_status_changed(self, _engine: Engine, connected: bool, detail: str) -> None:
+    def _on_status_changed(self, _worker: WorkerClient, connected: bool, detail: str) -> None:
         if self.tray:
             self.tray.send_status(connected, detail)
 
@@ -136,8 +140,7 @@ class SkullForgeApplication(Adw.Application):
         dialog.present(self.window)
 
     def _on_interval_changed(self, row: "Adw.SpinRow", _pspec) -> None:
-        self.config.refresh_interval_s = row.get_value()
-        self.engine.set_refresh_interval(row.get_value())
+        self.worker.set_refresh_interval(row.get_value())
         self.config.save()
 
     def _on_autostart_changed(self, row: "Adw.SwitchRow", _pspec) -> None:
@@ -164,5 +167,5 @@ class SkullForgeApplication(Adw.Application):
     def do_shutdown(self) -> None:
         if self.tray:
             self.tray.stop()
-        self.engine.stop()
+        self.worker.stop()
         Adw.Application.do_shutdown(self)

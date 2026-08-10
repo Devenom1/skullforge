@@ -1,17 +1,22 @@
 import math
-import threading
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk
+from gi.repository import Adw, Gdk, Gio, Gtk, GObject
 
-from .. import recovery
 from ..config import Config
-from ..core.engine import Engine
 from ..core.sensors import Stats
 from .preview import draw_color_preview, draw_stats_preview
+from .worker_client import WorkerClient
+
+# Only one panel driver exists today (170x320) and the worker process now
+# owns the driver instance, not the GUI - the preview just targets this
+# fixed size rather than querying a driver object across the process
+# boundary. Revisit if/when a second, differently-sized panel exists.
+_PANEL_WIDTH = 170
+_PANEL_HEIGHT = 320
 
 _BEZEL_CSS = b"""
 .sf-bezel {
@@ -22,6 +27,14 @@ _BEZEL_CSS = b"""
 """
 
 _PREVIEW_SCALE = 1.5
+
+# Ordered (key -> title) so both the Gtk.StringList model and the lookup
+# used to map a selected index back to a config value stay in sync.
+_DATE_FORMAT_TITLES = {
+    "short": "Short (Mon 2026-08-10)",
+    "iso": "ISO (2026-08-10)",
+    "long": "Long, two lines",
+}
 
 
 def _fmt(value, unit, precision=0):
@@ -40,9 +53,9 @@ def _rounded_rect_path(cr, x: float, y: float, width: float, height: float, radi
 
 
 class SkullForgeWindow(Adw.ApplicationWindow):
-    def __init__(self, application: Adw.Application, engine: Engine, config: Config):
+    def __init__(self, application: Adw.Application, worker: WorkerClient, config: Config):
         super().__init__(application=application, title="SkullForge")
-        self.engine = engine
+        self.worker = worker
         self.config = config
         self.set_default_size(760, 720)
 
@@ -75,8 +88,9 @@ class SkullForgeWindow(Adw.ApplicationWindow):
         toolbar_view.set_content(outer)
         self.set_content(toolbar_view)
 
-        self.engine.connect("stats-updated", self._on_stats_updated)
-        self.engine.connect("panel-status-changed", self._on_status_changed)
+        self.worker.connect("stats-updated", self._on_stats_updated)
+        self.worker.connect("panel-status-changed", self._on_status_changed)
+        self.worker.connect("recover-done", self._on_recover_done)
         self.connect("close-request", self._on_close_request)
 
     def _install_css(self) -> None:
@@ -98,6 +112,7 @@ class SkullForgeWindow(Adw.ApplicationWindow):
         menu = Gio.Menu()
         menu.append("Preferences", "app.preferences")
         menu.append("About SkullForge", "app.about")
+        menu.append("Quit", "app.quit")
         menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
         header.pack_end(menu_button)
 
@@ -118,8 +133,8 @@ class SkullForgeWindow(Adw.ApplicationWindow):
         # than via CSS overflow:hidden, for the same reason.
         self._preview_stats: Stats | None = None
         self.preview_area = Gtk.DrawingArea()
-        width = int(170 * _PREVIEW_SCALE)
-        height = int(320 * _PREVIEW_SCALE)
+        width = int(_PANEL_WIDTH * _PREVIEW_SCALE)
+        height = int(_PANEL_HEIGHT * _PREVIEW_SCALE)
         self.preview_area.set_content_width(width)
         self.preview_area.set_content_height(height)
         self.preview_area.set_draw_func(self._draw_preview)
@@ -136,17 +151,16 @@ class SkullForgeWindow(Adw.ApplicationWindow):
     def _draw_preview(self, _area: Gtk.DrawingArea, cr, width: int, height: int) -> None:
         if self._preview_stats is None:
             return
-        driver_width = self.engine.driver.width if self.engine.driver else 170
-        driver_height = self.engine.driver.height if self.engine.driver else 320
 
         _rounded_rect_path(cr, 0, 0, width, height, 14)
         cr.clip()
-        cr.scale(width / driver_width, height / driver_height)
+        cr.scale(width / _PANEL_WIDTH, height / _PANEL_HEIGHT)
 
         if self.config.display_mode == "color":
-            draw_color_preview(cr, driver_width, driver_height, self.config.color_hex)
+            draw_color_preview(cr, _PANEL_WIDTH, _PANEL_HEIGHT, self.config.color_hex)
         else:
-            draw_stats_preview(cr, driver_width, driver_height, self._preview_stats, self.config.time_format)
+            draw_stats_preview(cr, _PANEL_WIDTH, _PANEL_HEIGHT, self._preview_stats, self.config.time_format,
+                                self.config.date_format, self.config.visible_stats)
 
     def _build_controls_column(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, width_request=320)
@@ -172,19 +186,39 @@ class SkullForgeWindow(Adw.ApplicationWindow):
         self.time_row.add_suffix(self.time_toggle)
         display_group.add(self.time_row)
 
+        self.date_row = Adw.ComboRow(title="Date")
+        self.date_row.set_model(Gtk.StringList.new(list(_DATE_FORMAT_TITLES.values())))
+        date_keys = list(_DATE_FORMAT_TITLES.keys())
+        self.date_row.set_selected(date_keys.index(self.config.date_format))
+        self.date_row.connect("notify::selected", self._on_date_format_changed)
+        display_group.add(self.date_row)
+
         box.append(display_group)
 
-        # Live stat readouts
-        stats_group = Adw.PreferencesGroup(title="Live Readings")
-        self.stat_rows: dict[str, Adw.ActionRow] = {}
+        # Which stats show on the panel + their live values
+        stats_group = Adw.PreferencesGroup(
+            title="Panel Stats", description="Choose what shows on the panel"
+        )
+        self.stat_rows: dict[str, Gtk.Label] = {}
+        self.stat_switches: dict[str, Adw.SwitchRow] = {}
         for key, title in [("temp", "CPU Temperature"), ("load", "CPU Load"),
                             ("mem", "Memory Load"), ("power", "CPU Power")]:
-            row = Adw.ActionRow(title=title)
+            row = Adw.SwitchRow(title=title)
+            row.set_active(key in self.config.visible_stats)
+            row.connect("notify::active", self._on_stat_toggled, key)
             value_label = Gtk.Label(label="—")
             value_label.add_css_class("dim-label")
             row.add_suffix(value_label)
             self.stat_rows[key] = value_label
+            self.stat_switches[key] = row
             stats_group.add(row)
+
+        fan_row = Adw.SwitchRow(
+            title="Fan Speed", subtitle="Not yet supported on this hardware", active=False
+        )
+        fan_row.set_sensitive(False)
+        stats_group.add(fan_row)
+
         box.append(stats_group)
 
         # Actions
@@ -199,16 +233,16 @@ class SkullForgeWindow(Adw.ApplicationWindow):
 
         return box
 
-    # --- engine signal handlers -------------------------------------------------
+    # --- worker signal handlers -------------------------------------------------
 
-    def _on_stats_updated(self, _engine: Engine, stats: Stats) -> None:
+    def _on_stats_updated(self, _worker: WorkerClient, stats: Stats) -> None:
         self.stat_rows["temp"].set_label(_fmt(stats.cpu_temp_c, "°C", 1))
         self.stat_rows["load"].set_label(_fmt(stats.cpu_load_pct, "%", 0))
         self.stat_rows["mem"].set_label(_fmt(stats.mem_load_pct, "%", 0))
         self.stat_rows["power"].set_label(_fmt(stats.cpu_power_w, "W", 1))
         self._refresh_preview(stats)
 
-    def _on_status_changed(self, _engine: Engine, connected: bool, detail: str) -> None:
+    def _on_status_changed(self, _worker: WorkerClient, connected: bool, detail: str) -> None:
         if connected:
             self.banner.set_revealed(False)
         else:
@@ -222,19 +256,30 @@ class SkullForgeWindow(Adw.ApplicationWindow):
     # --- UI event handlers -------------------------------------------------
 
     def _on_mode_changed(self, toggle_group: Adw.ToggleGroup, _pspec: GObject.ParamSpec) -> None:
-        self.config.display_mode = toggle_group.get_active_name()
-        self.time_row.set_sensitive(self.config.display_mode == "stats")
+        mode = toggle_group.get_active_name()
+        self.time_row.set_sensitive(mode == "stats")
+        self.worker.set_display_mode(mode)
         self.config.save()
 
     def _on_time_format_changed(self, toggle_group: Adw.ToggleGroup, _pspec: GObject.ParamSpec) -> None:
-        self.config.time_format = toggle_group.get_active_name()
+        self.worker.set_time_format(toggle_group.get_active_name())
+        self.config.save()
+
+    def _on_date_format_changed(self, combo_row: Adw.ComboRow, _pspec: GObject.ParamSpec) -> None:
+        date_format = list(_DATE_FORMAT_TITLES.keys())[combo_row.get_selected()]
+        self.worker.set_date_format(date_format)
+        self.config.save()
+
+    def _on_stat_toggled(self, switch_row: Adw.SwitchRow, _pspec: GObject.ParamSpec, key: str) -> None:
+        visible = [k for k, row in self.stat_switches.items() if row.get_active()]
+        self.worker.set_visible_stats(visible)
         self.config.save()
 
     def _on_pause_toggled(self, button: Gtk.ToggleButton) -> None:
         self.set_paused(button.get_active())
 
     def set_paused(self, paused: bool) -> None:
-        self.engine.set_paused(paused)
+        self.worker.set_paused(paused)
         self.pause_button.set_icon_name(
             "media-playback-start-symbolic" if paused else "media-playback-pause-symbolic"
         )
@@ -247,28 +292,11 @@ class SkullForgeWindow(Adw.ApplicationWindow):
     def recover(self) -> None:
         self.banner.set_title("Recovering panel…")
         self.banner.set_revealed(True)
+        self.worker.recover()
 
-        # Stop the engine's own reconnect polling first - otherwise it keeps
-        # touching the USB device in the background, which resets the port's
-        # idle timer and prevents the recovery script's suspend step from
-        # ever actually triggering (confirmed: it reported "port never
-        # suspended" while the engine kept reconnecting concurrently).
-        self.engine.suspend_for_recovery()
-
-        def worker():
-            result = recovery.recover_panel(self.config)
-            GLib.idle_add(self._on_recover_done, result)
-
-        # recover_panel() blocks on a subprocess for up to ~60s (polling the
-        # USB port through a real power cycle) - run it off the main loop so
-        # the window stays responsive.
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_recover_done(self, result: recovery.RecoveryResult) -> bool:
-        self.engine.resume_after_recovery()
-        self.banner.set_title(result.message or ("Panel recovered" if result.ok else "Recovery failed"))
-        return GLib.SOURCE_REMOVE
+    def _on_recover_done(self, _worker: WorkerClient, ok: bool, message: str) -> None:
+        self.banner.set_title(message or ("Panel recovered" if ok else "Recovery failed"))
 
     def _on_close_request(self, _window: Gtk.Widget) -> bool:
         self.hide()
-        return True  # don't destroy - the engine keeps running in the background
+        return True  # don't destroy - the worker process keeps running in the background

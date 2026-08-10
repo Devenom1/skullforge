@@ -31,7 +31,7 @@ gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Pango, PangoCairo
 
-from ..core.render import _fmt
+from ..core.render import DEFAULT_VISIBLE_STATS, STAT_DEFS, _date_lines
 from ..core.sensors import Stats
 
 _BG = (12 / 255, 14 / 255, 24 / 255)
@@ -92,8 +92,12 @@ def _draw_background(cr, width: int, height: int) -> None:
     cr.fill()
 
 
-def draw_stats_preview(cr, width: int, height: int, stats: Stats, time_format: str) -> None:
+def draw_stats_preview(cr, width: int, height: int, stats: Stats, time_format: str,
+                        date_format: str = "short", visible_stats: list | None = None) -> None:
     from datetime import datetime
+
+    if visible_stats is None:
+        visible_stats = DEFAULT_VISIBLE_STATS
 
     _draw_background(cr, width, height)
     now = datetime.now()
@@ -101,26 +105,29 @@ def draw_stats_preview(cr, width: int, height: int, stats: Stats, time_format: s
     time_str = now.strftime("%I:%M %p").lstrip("0") if time_format == "12h" else now.strftime("%H:%M")
     _show_centered(cr, width, 16, time_str, _FONT_TIME, _FG)
 
-    date_str = now.strftime("%a %Y-%m-%d")
-    _show_centered(cr, width, 64, date_str, _FONT_DATE, _MUTED)
+    date_lines = _date_lines(now, date_format)
+    if len(date_lines) == 1:
+        _show_centered(cr, width, 64, date_lines[0], _FONT_DATE, _MUTED)
+        line_y, rows_start_y = 98, 120
+    else:
+        _show_centered(cr, width, 60, date_lines[0], _FONT_DATE, _MUTED)
+        _show_centered(cr, width, 78, date_lines[1], _FONT_DATE, _MUTED)
+        line_y, rows_start_y = 108, 128
 
     cr.set_source_rgb(*_ACCENT)
     cr.set_line_width(2)
-    cr.move_to(14, 98)
-    cr.line_to(width - 14, 98)
+    cr.move_to(14, line_y)
+    cr.line_to(width - 14, line_y)
     cr.stroke()
 
-    rows = [
-        ("TEMP", _fmt(stats.cpu_temp_c, "°C", 1)),
-        ("LOAD", _fmt(stats.cpu_load_pct, "%", 0)),
-        ("MEM", _fmt(stats.mem_load_pct, "%", 0)),
-        ("FAN", _fmt(stats.fan_rpm, " RPM", 0)),
-        ("PWR", _fmt(stats.cpu_power_w, "W", 1)),
-    ]
-    y = 120
-    for label, value in rows:
+    y = rows_start_y
+    for key in visible_stats:
+        stat_def = STAT_DEFS.get(key)
+        if stat_def is None:
+            continue
+        label, formatter = stat_def
         _show_left(cr, 14, y, label, _FONT_LABEL, _MUTED)
-        _show_right(cr, width - 14, y - 3, value, _FONT_VALUE, _FG)
+        _show_right(cr, width - 14, y - 3, formatter(stats), _FONT_VALUE, _FG)
         y += 40
 
 

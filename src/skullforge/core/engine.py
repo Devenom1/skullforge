@@ -219,10 +219,12 @@ class Engine(GObject.Object):
                 # make sure switching back to stats mode redraws fully first
                 self._needs_full_redraw = True
             elif not self.driver.supports_partial_refresh:
-                frame = render_frame_bytes(stats, self.driver.width, self.driver.height, self.config.time_format)
+                frame = render_frame_bytes(stats, self.driver.width, self.driver.height, self.config.time_format,
+                                            self.config.date_format, self.config.visible_stats)
                 self.driver.send_frame(frame)
             elif self._needs_full_redraw or self._ticks_since_full_redraw >= _FULL_REDRAW_EVERY_N_TICKS:
-                frame = render_frame_bytes(stats, self.driver.width, self.driver.height, self.config.time_format)
+                frame = render_frame_bytes(stats, self.driver.width, self.driver.height, self.config.time_format,
+                                            self.config.date_format, self.config.visible_stats)
                 self.driver.send_frame(frame)
                 self._needs_full_redraw = False
                 self._ticks_since_full_redraw = 0

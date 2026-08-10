@@ -18,10 +18,42 @@ _MUTED = (140, 145, 165)
 _ACCENT = (90, 180, 255)
 
 
+#: key -> (label, formatter(Stats) -> str). Shared with gui/preview.py so
+#: the live preview and the actual panel render identical row sets.
+#: "fan" is deliberately not offered as a toggleable choice in the UI (see
+#: config.py) since there's no known Linux source for it on this hardware
+#: - it stays defined here so nothing breaks if a user's saved config
+#: still lists it from before that restriction existed.
+STAT_DEFS = {
+    "temp": ("TEMP", lambda s: _fmt(s.cpu_temp_c, "°C", 1)),
+    "load": ("LOAD", lambda s: _fmt(s.cpu_load_pct, "%", 0)),
+    "mem": ("MEM", lambda s: _fmt(s.mem_load_pct, "%", 0)),
+    "fan": ("FAN", lambda s: _fmt(s.fan_rpm, " RPM", 0)),
+    "power": ("PWR", lambda s: _fmt(s.cpu_power_w, "W", 1)),
+}
+
+DEFAULT_VISIBLE_STATS = ["temp", "load", "mem", "power"]
+
+#: key -> human label, for preference UI display order/labels.
+DATE_FORMAT_LABELS = {
+    "short": "Short (Mon 2026-08-10)",
+    "iso": "ISO (2026-08-10)",
+    "long": "Long, two lines (Monday / August 10, 2026)",
+}
+
+
 def _fmt(value, unit, precision=0):
     if value is None:
         return "N/A"
     return f"{value:.{precision}f}{unit}"
+
+
+def _date_lines(now: datetime, date_format: str) -> list[str]:
+    if date_format == "iso":
+        return [now.strftime("%Y-%m-%d")]
+    if date_format == "long":
+        return [now.strftime("%A"), now.strftime("%B %d, %Y")]
+    return [now.strftime("%a %Y-%m-%d")]  # "short" (default)
 
 
 def _center_text(draw, width, y, text, font, fill):
@@ -37,27 +69,36 @@ def _stat_row(draw, width, y, label, value_text):
     draw.text((width - 14 - w, y - 3), value_text, font=_font_value, fill=_FG)
 
 
-def render_stats_image(stats: Stats, width: int, height: int, time_format: str = "24h") -> Image.Image:
+def render_stats_image(stats: Stats, width: int, height: int, time_format: str = "24h",
+                        date_format: str = "short", visible_stats: list[str] | None = None) -> Image.Image:
+    if visible_stats is None:
+        visible_stats = DEFAULT_VISIBLE_STATS
+
     now = datetime.now()
     img = Image.new("RGB", (width, height), _BG)
     draw = ImageDraw.Draw(img)
 
     time_str = now.strftime("%I:%M %p").lstrip("0") if time_format == "12h" else now.strftime("%H:%M")
     _center_text(draw, width, 16, time_str, _font_time, _FG)
-    _center_text(draw, width, 64, now.strftime("%a %Y-%m-%d"), _font_date, _MUTED)
 
-    draw.line([(14, 98), (width - 14, 98)], fill=_ACCENT, width=2)
+    date_lines = _date_lines(now, date_format)
+    if len(date_lines) == 1:
+        _center_text(draw, width, 64, date_lines[0], _font_date, _MUTED)
+        line_y, rows_start_y = 98, 120
+    else:
+        _center_text(draw, width, 60, date_lines[0], _font_date, _MUTED)
+        _center_text(draw, width, 78, date_lines[1], _font_date, _MUTED)
+        line_y, rows_start_y = 108, 128
 
-    rows = [
-        ("TEMP", _fmt(stats.cpu_temp_c, "°C", 1)),
-        ("LOAD", _fmt(stats.cpu_load_pct, "%", 0)),
-        ("MEM", _fmt(stats.mem_load_pct, "%", 0)),
-        ("FAN", _fmt(stats.fan_rpm, " RPM", 0)),
-        ("PWR", _fmt(stats.cpu_power_w, "W", 1)),
-    ]
-    y = 120
-    for label, value in rows:
-        _stat_row(draw, width, y, label, value)
+    draw.line([(14, line_y), (width - 14, line_y)], fill=_ACCENT, width=2)
+
+    y = rows_start_y
+    for key in visible_stats:
+        stat_def = STAT_DEFS.get(key)
+        if stat_def is None:
+            continue
+        label, formatter = stat_def
+        _stat_row(draw, width, y, label, formatter(stats))
         y += 40
 
     return img
@@ -87,8 +128,10 @@ def image_to_rgb565_bytes(img: Image.Image, rotate: bool = True) -> bytes:
 
 
 def render_frame_bytes(stats: Stats, width: int, height: int, time_format: str = "24h",
+                        date_format: str = "short", visible_stats: list[str] | None = None,
                         rotate: bool = True) -> bytes:
-    return image_to_rgb565_bytes(render_stats_image(stats, width, height, time_format), rotate=rotate)
+    img = render_stats_image(stats, width, height, time_format, date_format, visible_stats)
+    return image_to_rgb565_bytes(img, rotate=rotate)
 
 
 # --- Partial-region (LCD_REFRESH) support -----------------------------------
