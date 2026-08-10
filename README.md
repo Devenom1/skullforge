@@ -11,26 +11,22 @@ support for other panels can be added later without a rewrite; see
 
 ![status](https://img.shields.io/badge/status-early--days-orange)
 
-> **Known issue:** the GTK4 GUI's own live preview renders correctly, but
-> running the full GUI app has been observed to cause intermittent visual
-> corruption on the *physical panel* during sustained use, not reproduced
-> in `--headless` mode (see [Known issues](#known-issues-gui-vs-headless)).
-> **`skullforge --headless`, run as a systemd user service, is the
-> currently-recommended way to run this** until that's tracked down —
-> see [Recommended setup](#recommended-setup-headless--systemd).
-
 ## Features
 
 - Live CPU temperature, load, memory, and power on the panel, refreshed
   continuously
 - GTK4 / libadwaita desktop app with a tray icon — closing the window
-  doesn't stop updates, it just goes to the tray (see the known-issue note
-  above though)
-- 12/24-hour clock toggle, solid-color test mode
+  doesn't stop updates, it just goes to the tray; a "Quit" entry in the
+  header menu (and the tray) exits fully
+- Choose which stats show on the panel (temperature/load/memory/power,
+  independently toggleable) — Fan speed is listed but disabled, since
+  there's no known way to read it on this hardware yet
+- 12/24-hour clock toggle, selectable date format (short, ISO, or a
+  two-line long format), solid-color test mode
 - One-click panel recovery (power-cycles the panel's USB port to clear a
   stuck "Disconnection" state) without a password prompt each time
 - `skullforge --headless` for running just the update loop with no GUI —
-  currently the reliable way to run this, see below
+  handy for servers or a systemd unit, see below
 
 ## Install
 
@@ -66,10 +62,11 @@ and a narrowly-scoped sudoers rule (so the "Recover Panel" action, which
 needs root to power-cycle a USB port, doesn't prompt for a password every
 time), plus the desktop entry and icon.
 
-## Recommended setup: headless + systemd
+## Optional: headless + systemd
 
-Until the GUI issue above is resolved, run the update loop as a systemd
-user service instead of the GUI app:
+If you don't want a GUI window/tray icon at all — e.g. running on a
+headless box, or just preferring a background service — run the update
+loop as a systemd user service instead:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -96,28 +93,8 @@ skullforge --headless
 skullforge
 ```
 
-Works, and the in-app preview is correct — see the known-issue note at the
-top before relying on it for actual panel updates over long sessions.
-
-## Known issues (GUI vs headless)
-
-Extensive investigation (see the project memory / git history for the
-full trail) ruled out the obvious suspects: the exact bytes SkullForge
-sends to the panel were verified byte-perfect across multiple long runs
-(both headless and GUI), individual USB writes were confirmed to always
-transmit their full length (no silent partial writes), and a partial-
-region-update (`LCD_REFRESH`) approach - intended to reduce how often a
-full ~108KB redraw hits the panel, since continuous full redraws appear to
-destabilize it over time - made things measurably *worse* (the panel's
-error/lockout overlay started cycling) and was reverted.
-
-What's confirmed: `skullforge --headless` (no GTK loaded at all) has run
-reliably for the user over real, extended sessions. The full GUI app
-(GTK4/Adwaita/Cairo/Pango all loaded in the same process as the USB
-engine) has shown the panel reverting to corrupted content during
-sessions where headless mode did not. The exact mechanism isn't
-understood yet - it's not explained by anything in the rendered data or
-the USB transport layer that's been checked so far.
+Opens the main window and a tray icon. Closing the window keeps updates
+running in the tray; use Quit (header menu or tray) to exit fully.
 
 ## Architecture
 
@@ -134,26 +111,35 @@ the USB transport layer that's been checked so far.
   background thread, not the GLib main thread — a full-frame send can
   block for ~1.7s, and running that on the main thread froze the window
   entirely (confirmed: made it unresponsive to input, including dragging).
-- `skullforge.gui` — the GTK4/libadwaita window and application. The tray
-  icon (`gui/tray.py` + `gui/tray_helper.py`) runs as a **separate
-  process**: the tray library (`AyatanaAppIndicator3`) links against GTK3,
-  which can't be loaded in the same process as a GTK4 app, so the tray
-  icon is a small standalone GTK3 process talking to the main app over a
-  line-based protocol on its stdin/stdout pipes. The live preview
-  (`gui/preview.py`) paints directly onto a `cairo.ImageSurface` and
-  displays it via `Gtk.DrawingArea` rather than `Gtk.Picture`/
-  `Gdk.Texture` — this environment's graphics stack was found to corrupt
-  non-uniform image content (text came out unreadable) anywhere a
-  `GdkPixbuf` got bridged into GDK's texture/cairo integration, so that
-  bridge is bypassed entirely.
+- `skullforge.gui` — the GTK4/libadwaita window and application. The
+  engine/USB connection is owned by a **separate worker process**
+  (`gui/worker_process.py`), talked to over a line-based protocol on its
+  stdin/stdout pipes (`gui/worker_client.py` is the GUI-side handle).
+  This isn't just IPC hygiene: having GTK4/Adwaita/Cairo/Pango loaded in
+  the same process as the USB engine was found to destabilize the
+  physical panel during sustained use (corrupted content after a few
+  minutes), reproduced with a real window, with no window, without the
+  tray subprocess, and even with those libraries merely imported and
+  never used — `--headless` mode (no GTK anywhere) never showed it. The
+  worker process imports none of GTK/Adwaita/Cairo/Pango, so the GUI and
+  the USB-owning code never share a process. The tray icon (`gui/tray.py`
+  + `gui/tray_helper.py`) follows the same pattern for a different
+  reason: the tray library (`AyatanaAppIndicator3`) links against GTK3,
+  which can't be loaded in the same process as a GTK4 app, so it's a
+  small standalone GTK3 process talking to the main app over its own
+  stdin/stdout line protocol. The live preview (`gui/preview.py`) paints
+  directly onto a `cairo.ImageSurface` and displays it via
+  `Gtk.DrawingArea` rather than `Gtk.Picture`/`Gdk.Texture` — this
+  environment's graphics stack was found to corrupt non-uniform image
+  content (text came out unreadable) anywhere a `GdkPixbuf` got bridged
+  into GDK's texture/cairo integration, so that bridge is bypassed
+  entirely.
 
 ## Roadmap / not yet built
 
-- **Root-cause the GUI-vs-headless panel corruption** (see Known issues)
-  — top priority, blocks recommending the GUI for real use
 - A second panel driver (the seam exists; nothing else to plug into it
   yet)
-- Per-row stat visibility toggles (choose which stats show on the panel)
+- Read fan RPM — no known source for it on Linux yet for this hardware
 - Packaged releases (`.deb`/Flatpak) — for now it's run-from-source
 
 ## License
