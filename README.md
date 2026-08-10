@@ -139,7 +139,6 @@ running in the tray; use Quit (header menu or tray) to exit fully.
 
 - A second panel driver (the seam exists; nothing else to plug into it
   yet)
-- Read fan RPM — no known source for it on Linux yet for this hardware
 - Packaged releases (`.deb`/Flatpak) — for now it's run-from-source
 
 ## License
