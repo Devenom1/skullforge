@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skullforge"
+version = "0.1.0"
+description = "Native Linux desktop app for USB stats panels (SkullSaints Agni and friends)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "SkullForge contributors" }]
+dependencies = [
+    "pyusb~=1.3.1",
+    "Pillow~=12.3.0",
+    "numpy~=2.4.4",
+    "psutil~=7.2.2",
+    "tomli-w~=1.0",
+    "pycairo~=1.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/skullforge/skullforge"
+
+[project.scripts]
+skullforge = "skullforge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

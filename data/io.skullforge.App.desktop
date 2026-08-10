@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=SkullForge
+Comment=Live system stats on your USB TFT panel
+Exec=skullforge
+Icon=io.skullforge.App
+Terminal=false
+Categories=Utility;HardwareSettings;
+StartupWMClass=io.skullforge.App

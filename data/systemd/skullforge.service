@@ -1,0 +1,11 @@
+[Unit]
+Description=SkullForge panel updater (headless)
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/Projects/SkullSaints/skullforge/venv/bin/skullforge --headless
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
